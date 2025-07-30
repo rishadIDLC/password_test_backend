@@ -11,8 +11,15 @@ import {
 
 const app = express();
 app.use(express.json());
+
+const rpName = 'Gemini WebAuthn Demo';
+// The domain name of your frontend
+const rpID = 'password-test-frontend.vercel.app'; 
+// The full URL of your frontend
+const origin = `https://${rpID}`; 
+
 app.use(cors({
-  origin: '*', // Vite dev server address
+  origin: origin, // Allow requests only from your frontend URL
   credentials: true,
 }));
 
@@ -20,10 +27,6 @@ app.use(cors({
 // In a real app, you would use a database (e.g., PostgreSQL, MongoDB).
 const users = {}; // Store challenges temporarily
 const authenticators = {}; // Store permanent authenticator data
-
-const rpName = 'Gemini WebAuthn Demo';
-const rpID = 'password-test-frontend.vercel.app';
-const origin = `http://${rpID}:5173`;
 
 console.log('Server started. In-memory stores are empty.');
 
@@ -131,9 +134,6 @@ app.get('/generate-authentication-options', async (req, res) => {
     const options = await generateAuthenticationOptions({
         rpID,
         allowCredentials: [{
-            // **FIX**: Pass the raw base64url string directly from the "database".
-            // The library's internal code seems to expect a string here, despite
-            // TypeScript types suggesting a BufferSource.
             id: authenticators[username].credentialID,
             type: 'public-key',
             transports: authenticators[username].transports,
@@ -166,7 +166,6 @@ app.post('/verify-authentication', async (req, res) => {
 
     try {
         const authenticatorDevice = {
-            // Use Buffer for base64url conversion
             credentialID: Buffer.from(authenticator.credentialID, 'base64url'),
             credentialPublicKey: Buffer.from(authenticator.credentialPublicKey, 'base64url'),
             counter: authenticator.counter,
@@ -187,9 +186,7 @@ app.post('/verify-authentication', async (req, res) => {
 
         if (verified) {
             console.log(' -> Verification successful. Updating counter.');
-            // Update the authenticator's counter
             authenticators[username].counter = authenticationInfo.newCounter;
-            // Clean up the temporary challenge
             delete users[username];
             res.json({ verified: true });
         } else {
@@ -202,7 +199,7 @@ app.post('/verify-authentication', async (req, res) => {
 });
 
 
-const PORT = 3000;
+const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`Server listening on port ${PORT}`);
 });
