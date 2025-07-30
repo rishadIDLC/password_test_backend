@@ -13,137 +13,132 @@ const app = express();
 app.use(express.json());
 
 const rpName = 'Gemini WebAuthn Demo';
-const rpID = 'password-test-frontend.vercel.app'; // Your frontend domain
+const rpID = 'password-test-frontend.vercel.app';
 const origin = `https://${rpID}`;
 
 app.use(cors({
-  origin,
+  origin: origin,
   credentials: true,
 }));
 
-// In-memory stores
-const challenges = {}; // Stores challenges temporarily
-const users = {}; // Key: username, value: user data
-const authenticators = {}; // Key: credentialID, value: authenticator + username
+// In-memory store
+const users = {}; // stores challenges
+const authenticators = {}; // stores registered passkeys
 
-console.log('Server started. In-memory stores are empty.');
-
-// 1. Registration Options
+// 1. Generate Registration Options
 app.get('/generate-registration-options', async (req, res) => {
   const { username } = req.query;
-  if (!username) return res.status(400).json({ error: 'Username required' });
-  if (Object.values(users).find(u => u.username === username)) {
-    return res.status(400).json({ error: 'Username already taken' });
-  }
+  if (!username) return res.status(400).json({ error: 'Username is required' });
+  if (authenticators[username]) return res.status(400).json({ error: 'Username already taken' });
 
   const options = await generateRegistrationOptions({
     rpName,
     rpID,
     userID: username,
     userName: username,
+    excludeCredentials: [],
     authenticatorSelection: {
       authenticatorAttachment: 'platform',
-      requireResidentKey: true,
       userVerification: 'required',
+      requireResidentKey: true,
     },
     timeout: 60000,
   });
 
-  challenges[username] = options.challenge;
+  users[username] = { currentChallenge: options.challenge };
   res.json(options);
 });
 
 // 2. Verify Registration
 app.post('/verify-registration', async (req, res) => {
   const { username, response } = req.body;
-  const expectedChallenge = challenges[username];
-  if (!expectedChallenge) return res.status(400).json({ error: 'No challenge found' });
+  const user = users[username];
+  if (!user) return res.status(400).json({ error: 'No challenge found' });
 
   try {
-    const verification = await verifyRegistrationResponse({
+    const { verified, registrationInfo } = await verifyRegistrationResponse({
       response,
-      expectedChallenge,
+      expectedChallenge: user.currentChallenge,
       expectedOrigin: origin,
       expectedRPID: rpID,
       requireUserVerification: true,
     });
 
-    const { verified, registrationInfo } = verification;
     if (!verified || !registrationInfo) return res.status(400).json({ error: 'Verification failed' });
 
-    const { credentialID, credentialPublicKey, counter } = registrationInfo;
-    const base64ID = Buffer.from(credentialID).toString('base64url');
-
-    // Store user and authenticator
-    users[username] = { username, credentialID: base64ID };
-    authenticators[base64ID] = {
-      credentialID: base64ID,
+    const { credentialPublicKey, credentialID, counter } = registrationInfo;
+    authenticators[username] = {
+      credentialID: Buffer.from(credentialID).toString('base64url'),
       credentialPublicKey: Buffer.from(credentialPublicKey).toString('base64url'),
       counter,
-      username,
+      transports: response.response.transports,
     };
 
-    delete challenges[username];
+    delete users[username];
     res.json({ verified: true });
-  } catch (e) {
-    console.error('[verify-registration]', e);
-    res.status(500).json({ error: 'Registration verification failed' });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Internal error', details: err.message });
   }
 });
 
-// 3. Authentication Options (username-less)
+// 3. Generate Authentication Options
 app.get('/generate-authentication-options', async (req, res) => {
+  const { username } = req.query;
+  if (!authenticators[username]) return res.status(400).json({ error: 'User not registered' });
+
   const options = await generateAuthenticationOptions({
     rpID,
+    allowCredentials: [
+      {
+        id: authenticators[username].credentialID,
+        type: 'public-key',
+        transports: authenticators[username].transports,
+      },
+    ],
     userVerification: 'required',
     timeout: 60000,
   });
 
-  // Save challenge globally (temporary)
-  challenges['login'] = options.challenge;
+  users[username] = { currentChallenge: options.challenge };
   res.json(options);
 });
 
-// 4. Verify Authentication (username-less)
+// 4. Verify Authentication
 app.post('/verify-authentication', async (req, res) => {
-  const { response } = req.body;
-  const expectedChallenge = challenges['login'];
-  if (!expectedChallenge) return res.status(400).json({ error: 'No login challenge' });
+  const { username, response } = req.body;
+  const user = users[username];
+  const auth = authenticators[username];
+
+  if (!user || !auth) return res.status(400).json({ error: 'User or challenge not found' });
 
   try {
-    const credentialID = response.rawId;
-    const base64ID = Buffer.from(credentialID, 'base64url').toString('base64url');
-    const auth = authenticators[base64ID];
-    if (!auth) return res.status(400).json({ error: 'Credential not found' });
-
-    const verification = await verifyAuthenticationResponse({
+    const verifiedResp = await verifyAuthenticationResponse({
       response,
-      expectedChallenge,
+      expectedChallenge: user.currentChallenge,
       expectedOrigin: origin,
       expectedRPID: rpID,
       authenticator: {
         credentialID: Buffer.from(auth.credentialID, 'base64url'),
         credentialPublicKey: Buffer.from(auth.credentialPublicKey, 'base64url'),
         counter: auth.counter,
+        transports: auth.transports,
       },
       requireUserVerification: true,
     });
 
-    const { verified, authenticationInfo } = verification;
-    if (verified) {
-      auth.counter = authenticationInfo.newCounter;
-      delete challenges['login'];
-      return res.json({ verified: true, username: auth.username });
-    } else {
-      return res.status(400).json({ error: 'Authentication failed' });
-    }
-  } catch (e) {
-    console.error('[verify-authentication]', e);
-    res.status(500).json({ error: 'Authentication verification failed' });
+    const { verified, authenticationInfo } = verifiedResp;
+    if (!verified) return res.status(400).json({ error: 'Authentication failed' });
+
+    authenticators[username].counter = authenticationInfo.newCounter;
+    delete users[username];
+
+    res.json({ verified: true });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Internal error', details: err.message });
   }
 });
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
-  console.log(`✅ Server running on http://localhost:${PORT}`);
-});
+app.listen(PORT, () => console.log(`Server listening on port ${PORT}`));
