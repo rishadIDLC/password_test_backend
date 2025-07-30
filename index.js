@@ -1,5 +1,4 @@
 // server.js
-
 import express from 'express';
 import cors from 'cors';
 import {
@@ -13,78 +12,56 @@ const app = express();
 app.use(express.json());
 
 const rpName = 'Gemini WebAuthn Demo';
-// The domain name of your frontend
-const rpID = 'password-test-frontend.vercel.app'; 
-// The full URL of your frontend
-const origin = `https://${rpID}`; 
+const rpID = 'password-test-frontend.vercel.app'; // Your frontend domain
+const origin = `https://${rpID}`;
 
+// Enable CORS only for your frontend
 app.use(cors({
-  origin: origin, // Allow requests only from your frontend URL
+  origin,
   credentials: true,
 }));
 
-// In-memory store for users and their authenticators.
-// In a real app, you would use a database (e.g., PostgreSQL, MongoDB).
-const users = {}; // Store challenges temporarily
-const authenticators = {}; // Store permanent authenticator data
+// Temporary in-memory stores
+const users = {};         // username -> { currentChallenge }
+const authenticators = {}; // username -> authenticator data
 
-console.log('Server started. In-memory stores are empty.');
-
-// 1. Generate Registration Options
+// 1. Registration - Generate options
 app.get('/generate-registration-options', async (req, res) => {
   const { username } = req.query;
-  console.log(`\n[GET /generate-registration-options] for username: ${username}`);
-
-  if (!username) {
-    console.log('[ERROR] Username is required');
-    return res.status(400).json({ error: 'Username is required' });
-  }
+  if (!username) return res.status(400).json({ error: 'Username is required' });
 
   if (authenticators[username]) {
-    console.log(`[ERROR] Username "${username}" is already registered.`);
     return res.status(400).json({ error: 'Username already taken' });
   }
+
+  const userID = username; // For demo; use unique IDs in real systems
 
   const options = await generateRegistrationOptions({
     rpName,
     rpID,
+    userID,
     userName: username,
-    excludeCredentials: [],
+    userDisplayName: username,
     authenticatorSelection: {
       authenticatorAttachment: 'platform',
-      userVerification: 'required', 
-      // **FIX**: Change from false to true. This creates a "discoverable credential" (resident key),
-      // which is more robust and easily found by the browser during login.
-      requireResidentKey: true,
+      userVerification: 'required',
+      requireResidentKey: true, // Allow usernameless login
     },
+    attestationType: 'none',
   });
 
-  // Temporarily store the challenge for this user
-  users[username] = {
-    currentChallenge: options.challenge,
-  };
-  
-  console.log(` -> Stored challenge for "${username}". Current users with challenges:`, Object.keys(users));
-  console.log(` -> Sending options to frontend:`, options);
+  users[username] = { currentChallenge: options.challenge };
 
   res.json(options);
 });
 
-// 2. Verify Registration Response
+// 2. Registration - Verify response
 app.post('/verify-registration', async (req, res) => {
   const { username, response } = req.body;
-  console.log(`\n[POST /verify-registration] for username: ${username}`);
-  console.log(' -> Current users with challenges:', Object.keys(users));
-
   const user = users[username];
-
-  if (!user) {
-    console.log(`[ERROR] No challenge found for user "${username}". Maybe server restarted?`);
-    return res.status(400).json({ error: 'User not found or registration expired. Please try registering again.' });
-  }
+  if (!user) return res.status(400).json({ error: 'User not found or registration expired.' });
 
   try {
-    console.log(' -> Verifying registration response with expected challenge:', user.currentChallenge);
     const verification = await verifyRegistrationResponse({
       response,
       expectedChallenge: user.currentChallenge,
@@ -94,114 +71,88 @@ app.post('/verify-registration', async (req, res) => {
     });
 
     const { verified, registrationInfo } = verification;
-    console.log(` -> Verification result: ${verified}`);
-
     if (verified && registrationInfo) {
-      console.log(' -> Verification successful. Storing new authenticator.');
       const { credentialPublicKey, credentialID, counter } = registrationInfo;
 
-      // Use Buffer for base64url conversion
       authenticators[username] = {
         credentialID: Buffer.from(credentialID).toString('base64url'),
         credentialPublicKey: Buffer.from(credentialPublicKey).toString('base64url'),
         counter,
         transports: response.response.transports,
       };
-      
-      console.log(' -> Registered authenticators:', Object.keys(authenticators));
 
-      // Clean up the temporary challenge
       delete users[username];
-
       res.json({ verified: true });
     } else {
       res.status(400).json({ error: 'Could not verify registration.' });
     }
-  } catch (error) {
-    console.error('[ERROR] /verify-registration:', error);
-    res.status(500).json({ error: 'Verification failed', details: error.message });
+  } catch (err) {
+    console.error('Registration error:', err);
+    res.status(500).json({ error: err.message });
   }
 });
 
-// 3. Generate Authentication Options
+// 3. Authentication - Generate options
 app.get('/generate-authentication-options', async (req, res) => {
-    const { username } = req.query;
-    console.log(`\n[GET /generate-authentication-options] for username: ${username}`);
+  const { username } = req.query;
+  if (!authenticators[username]) {
+    return res.status(400).json({ error: 'User not registered.' });
+  }
 
-    if (!authenticators[username]) {
-        console.log(`[ERROR] Authenticator not found for user "${username}".`);
-        return res.status(400).json({ error: 'User not registered.' });
-    }
+  const options = await generateAuthenticationOptions({
+    rpID,
+    // ⚠️ Don't send allowCredentials if using resident keys
+    userVerification: 'required',
+  });
 
-    const options = await generateAuthenticationOptions({
-        rpID,
-        allowCredentials: [{
-            id: authenticators[username].credentialID,
-            type: 'public-key',
-            transports: authenticators[username].transports,
-        }],
-        userVerification: 'required',
+  users[username] = { currentChallenge: options.challenge };
+
+  res.json(options);
+});
+
+// 4. Authentication - Verify response
+app.post('/verify-authentication', async (req, res) => {
+  const { username, response } = req.body;
+  const user = users[username];
+  const authenticator = authenticators[username];
+
+  if (!user || !authenticator) {
+    return res.status(400).json({ error: 'User not found or authentication expired.' });
+  }
+
+  try {
+    const authenticatorDevice = {
+      credentialID: Buffer.from(authenticator.credentialID, 'base64url'),
+      credentialPublicKey: Buffer.from(authenticator.credentialPublicKey, 'base64url'),
+      counter: authenticator.counter,
+      transports: authenticator.transports,
+    };
+
+    const verification = await verifyAuthenticationResponse({
+      response,
+      expectedChallenge: user.currentChallenge,
+      expectedOrigin: origin,
+      expectedRPID: rpID,
+      authenticator: authenticatorDevice,
+      requireUserVerification: true,
     });
 
-    // Temporarily store the challenge
-    users[username] = { currentChallenge: options.challenge };
-    console.log(` -> Stored challenge for "${username}". Current users with challenges:`, Object.keys(users));
-    console.log(` -> Sending options to frontend:`, options);
+    const { verified, authenticationInfo } = verification;
 
-    res.json(options);
-});
-
-
-// 4. Verify Authentication Response
-app.post('/verify-authentication', async (req, res) => {
-    const { username, response } = req.body;
-    console.log(`\n[POST /verify-authentication] for username: ${username}`);
-    console.log(' -> Current users with challenges:', Object.keys(users));
-    
-    const user = users[username];
-    const authenticator = authenticators[username];
-
-    if (!user || !authenticator) {
-        console.log(`[ERROR] User or authenticator not found for "${username}".`);
-        return res.status(400).json({ error: 'User not found or authentication expired.' });
+    if (verified) {
+      authenticators[username].counter = authenticationInfo.newCounter;
+      delete users[username];
+      res.json({ verified: true });
+    } else {
+      res.status(400).json({ error: 'Could not verify authentication.' });
     }
-
-    try {
-        const authenticatorDevice = {
-            credentialID: Buffer.from(authenticator.credentialID, 'base64url'),
-            credentialPublicKey: Buffer.from(authenticator.credentialPublicKey, 'base64url'),
-            counter: authenticator.counter,
-            transports: authenticator.transports,
-        };
-
-        const verification = await verifyAuthenticationResponse({
-            response,
-            expectedChallenge: user.currentChallenge,
-            expectedOrigin: origin,
-            expectedRPID: rpID,
-            authenticator: authenticatorDevice,
-            requireUserVerification: true,
-        });
-
-        const { verified, authenticationInfo } = verification;
-        console.log(` -> Verification result: ${verified}`);
-
-        if (verified) {
-            console.log(' -> Verification successful. Updating counter.');
-            authenticators[username].counter = authenticationInfo.newCounter;
-            delete users[username];
-            res.json({ verified: true });
-        } else {
-            res.status(400).json({ error: 'Could not verify authentication.' });
-        }
-    } catch (error) {
-        console.error('[ERROR] /verify-authentication:', error);
-        res.status(500).json({ error: 'Verification failed', details: error.message });
-    }
+  } catch (err) {
+    console.error('Authentication error:', err);
+    res.status(500).json({ error: err.message });
+  }
 });
-
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
-  console.log(`Server listening on port ${PORT}`);
+  console.log(`✅ Server running on port ${PORT}`);
 });
