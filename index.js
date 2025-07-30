@@ -13,20 +13,17 @@ const app = express();
 app.use(express.json());
 
 const rpName = 'Gemini WebAuthn Demo';
-// The domain name of your frontend
 const rpID = 'password-test-frontend.vercel.app'; 
-// The full URL of your frontend
 const origin = `https://${rpID}`; 
 
 app.use(cors({
-  origin: origin, // Allow requests only from your frontend URL
+  origin: origin,
   credentials: true,
 }));
 
-// In-memory store for users and their authenticators.
-// In a real app, you would use a database (e.g., PostgreSQL, MongoDB).
-const users = {}; // Store challenges temporarily
-const authenticators = {}; // Store permanent authenticator data
+// In-memory stores
+const users = {};
+const authenticators = {};
 
 console.log('Server started. In-memory stores are empty.');
 
@@ -49,17 +46,18 @@ app.get('/generate-registration-options', async (req, res) => {
     rpName,
     rpID,
     userName: username,
+    userDisplayName: username,
     excludeCredentials: [],
     authenticatorSelection: {
       authenticatorAttachment: 'platform',
-      userVerification: 'required', 
-      // **FIX**: Change from false to true. This creates a "discoverable credential" (resident key),
-      // which is more robust and easily found by the browser during login.
+      userVerification: 'required',
       requireResidentKey: true,
+      residentKey: 'required',
     },
+    attestation: 'direct',
+    supportedAlgorithmIDs: [-7, -257], // ES256 and RS256
   });
 
-  // Temporarily store the challenge for this user
   users[username] = {
     currentChallenge: options.challenge,
   };
@@ -100,7 +98,6 @@ app.post('/verify-registration', async (req, res) => {
       console.log(' -> Verification successful. Storing new authenticator.');
       const { credentialPublicKey, credentialID, counter } = registrationInfo;
 
-      // Use Buffer for base64url conversion
       authenticators[username] = {
         credentialID: Buffer.from(credentialID).toString('base64url'),
         credentialPublicKey: Buffer.from(credentialPublicKey).toString('base64url'),
@@ -110,9 +107,7 @@ app.post('/verify-registration', async (req, res) => {
       
       console.log(' -> Registered authenticators:', Object.keys(authenticators));
 
-      // Clean up the temporary challenge
       delete users[username];
-
       res.json({ verified: true });
     } else {
       res.status(400).json({ error: 'Could not verify registration.' });
@@ -123,30 +118,37 @@ app.post('/verify-registration', async (req, res) => {
   }
 });
 
+// 3. Generate Authentication Options
 app.get('/generate-authentication-options', async (req, res) => {
   const { username } = req.query;
-  if (!authenticators[username]) {
-    return res.status(400).json({ error: 'User not registered.' });
-  }
+  console.log(`\n[GET /generate-authentication-options] for username: ${username}`);
 
+  // For discoverable credentials, we don't need to provide allowCredentials
+  // The browser will find the right credential automatically
   const options = await generateAuthenticationOptions({
     rpID,
-    // ⚠️ Don't send allowCredentials if using resident keys
     userVerification: 'required',
   });
 
+  // Store the challenge for this user
   users[username] = { currentChallenge: options.challenge };
+  console.log(` -> Stored challenge for "${username}". Current users with challenges:`, Object.keys(users));
+  console.log(` -> Sending options to frontend:`, options);
 
   res.json(options);
 });
 
-// 4. Authentication - Verify response
+// 4. Verify Authentication Response
 app.post('/verify-authentication', async (req, res) => {
   const { username, response } = req.body;
+  console.log(`\n[POST /verify-authentication] for username: ${username}`);
+  console.log(' -> Current users with challenges:', Object.keys(users));
+  
   const user = users[username];
   const authenticator = authenticators[username];
 
   if (!user || !authenticator) {
+    console.log(`[ERROR] User or authenticator not found for "${username}".`);
     return res.status(400).json({ error: 'User not found or authentication expired.' });
   }
 
@@ -168,21 +170,21 @@ app.post('/verify-authentication', async (req, res) => {
     });
 
     const { verified, authenticationInfo } = verification;
+    console.log(` -> Verification result: ${verified}`);
 
     if (verified) {
+      console.log(' -> Verification successful. Updating counter.');
       authenticators[username].counter = authenticationInfo.newCounter;
       delete users[username];
       res.json({ verified: true });
     } else {
       res.status(400).json({ error: 'Could not verify authentication.' });
     }
-  } catch (err) {
-    console.error('Authentication error:', err);
-    res.status(500).json({ error: err.message });
+  } catch (error) {
+    console.error('[ERROR] /verify-authentication:', error);
+    res.status(500).json({ error: 'Verification failed', details: error.message });
   }
 });
-
-
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
