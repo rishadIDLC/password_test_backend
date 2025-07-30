@@ -1,5 +1,4 @@
 // server.js
-
 import express from 'express';
 import cors from 'cors';
 import {
@@ -21,21 +20,49 @@ app.use(cors({
   credentials: true,
 }));
 
-// In-memory stores with improved structure
-const userChallenges = {}; // Stores temporary challenges
-const userAuthenticators = {}; // Stores permanent authenticator data
+// Enhanced storage with debugging capabilities
+const userStore = {
+  challenges: {},
+  authenticators: {},
+  
+  // Helper methods
+  addAuthenticator(username, authenticator) {
+    this.authenticators[username.toLowerCase()] = authenticator;
+    console.log(`Registered authenticator for ${username}. Current users:`, Object.keys(this.authenticators));
+  },
+  
+  getAuthenticator(username) {
+    return this.authenticators[username.toLowerCase()];
+  },
+  
+  addChallenge(username, challenge) {
+    this.challenges[username.toLowerCase()] = {
+      challenge,
+      timestamp: Date.now()
+    };
+  },
+  
+  getChallenge(username) {
+    return this.challenges[username.toLowerCase()];
+  },
+  
+  clearChallenge(username) {
+    delete this.challenges[username.toLowerCase()];
+  }
+};
 
 // 1. Generate Registration Options
 app.get('/generate-registration-options', async (req, res) => {
-  const { username } = req.query;
-  console.log(`\n[GET /generate-registration-options] for username: ${username}`);
+  const username = req.query.username?.trim();
+  console.log(`\n[REGISTER] Start for username: ${username}`);
 
   if (!username) {
     return res.status(400).json({ error: 'Username is required' });
   }
 
-  if (userAuthenticators[username]) {
-    return res.status(400).json({ error: 'Username already registered' });
+  if (userStore.getAuthenticator(username)) {
+    console.log(`[CONFLICT] Username ${username} already exists`);
+    return res.status(409).json({ error: 'Username already registered' });
   }
 
   const options = await generateRegistrationOptions({
@@ -52,23 +79,21 @@ app.get('/generate-registration-options', async (req, res) => {
     },
   });
 
-  userChallenges[username] = {
-    challenge: options.challenge,
-    timestamp: Date.now()
-  };
-
-  console.log(`Generated registration challenge for ${username}`);
+  userStore.addChallenge(username, options.challenge);
+  console.log(`[REGISTER] Challenge stored for ${username}`);
   res.json(options);
 });
 
 // 2. Verify Registration Response
 app.post('/verify-registration', async (req, res) => {
   const { username, response } = req.body;
-  console.log(`\n[POST /verify-registration] for username: ${username}`);
+  const normalizedUsername = username?.toLowerCase().trim();
+  console.log(`\n[REGISTER] Verify for username: ${normalizedUsername}`);
 
-  const userChallenge = userChallenges[username];
+  const userChallenge = userStore.getChallenge(normalizedUsername);
 
   if (!userChallenge) {
+    console.log('[ERROR] No challenge found for user:', normalizedUsername);
     return res.status(400).json({ error: 'Registration session expired. Please try again.' });
   }
 
@@ -84,30 +109,43 @@ app.post('/verify-registration', async (req, res) => {
     if (verification.verified && verification.registrationInfo) {
       const { credentialPublicKey, credentialID, counter } = verification.registrationInfo;
 
-      userAuthenticators[username] = {
+      userStore.addAuthenticator(normalizedUsername, {
         credentialID: Buffer.from(credentialID).toString('base64url'),
         credentialPublicKey: Buffer.from(credentialPublicKey).toString('base64url'),
         counter,
-        transports: response.response.transports,
-      };
+        transports: response.response.transports || ['internal'],
+      });
 
-      delete userChallenges[username];
-      return res.json({ verified: true });
+      userStore.clearChallenge(normalizedUsername);
+      console.log(`[SUCCESS] User ${normalizedUsername} registered successfully`);
+      return res.json({ verified: true, username: normalizedUsername });
     }
+    
     return res.status(400).json({ error: 'Verification failed' });
   } catch (error) {
-    console.error('Registration error:', error);
-    return res.status(500).json({ error: error.message });
+    console.error('[ERROR] Registration failed:', error);
+    return res.status(500).json({ error: 'Registration failed: ' + error.message });
   }
 });
 
 // 3. Generate Authentication Options
 app.get('/generate-authentication-options', async (req, res) => {
-  const { username } = req.query;
-  console.log(`\n[GET /generate-authentication-options] for username: ${username}`);
+  const username = req.query.username?.trim();
+  const normalizedUsername = username?.toLowerCase();
+  console.log(`\n[LOGIN] Start for username: ${normalizedUsername}`);
 
-  if (!username || !userAuthenticators[username]) {
-    return res.status(400).json({ error: 'User not registered' });
+  if (!username) {
+    return res.status(400).json({ error: 'Username is required' });
+  }
+
+  const authenticator = userStore.getAuthenticator(normalizedUsername);
+  if (!authenticator) {
+    console.log(`[ERROR] No authenticator found for: ${normalizedUsername}`);
+    console.log('Registered users:', Object.keys(userStore.authenticators));
+    return res.status(404).json({ 
+      error: 'User not registered',
+      registeredUsers: Object.keys(userStore.authenticators) // For debugging
+    });
   }
 
   const options = await generateAuthenticationOptions({
@@ -115,28 +153,27 @@ app.get('/generate-authentication-options', async (req, res) => {
     userVerification: 'required',
   });
 
-  userChallenges[username] = {
-    challenge: options.challenge,
-    timestamp: Date.now()
-  };
-
-  console.log(`Generated authentication challenge for ${username}`);
+  userStore.addChallenge(normalizedUsername, options.challenge);
+  console.log(`[LOGIN] Challenge stored for ${normalizedUsername}`);
   res.json(options);
 });
 
 // 4. Verify Authentication Response
 app.post('/verify-authentication', async (req, res) => {
   const { username, response } = req.body;
-  console.log(`\n[POST /verify-authentication] for username: ${username}`);
+  const normalizedUsername = username?.toLowerCase().trim();
+  console.log(`\n[LOGIN] Verify for username: ${normalizedUsername}`);
 
-  const userChallenge = userChallenges[username];
-  const authenticator = userAuthenticators[username];
+  const userChallenge = userStore.getChallenge(normalizedUsername);
+  const authenticator = userStore.getAuthenticator(normalizedUsername);
 
   if (!userChallenge || !authenticator) {
-    console.log('Available users:', Object.keys(userAuthenticators));
+    console.log(`[ERROR] Challenge or authenticator missing for: ${normalizedUsername}`);
+    console.log('Current challenges:', Object.keys(userStore.challenges));
+    console.log('Registered users:', Object.keys(userStore.authenticators));
     return res.status(400).json({ 
       error: 'Authentication session expired or user not found',
-      availableUsers: Object.keys(userAuthenticators) // For debugging
+      availableUsers: Object.keys(userStore.authenticators)
     });
   }
 
@@ -156,23 +193,21 @@ app.post('/verify-authentication', async (req, res) => {
     });
 
     if (verification.verified) {
-      userAuthenticators[username].counter = verification.authenticationInfo.newCounter;
-      delete userChallenges[username];
-      return res.json({ verified: true });
+      authenticator.counter = verification.authenticationInfo.newCounter;
+      userStore.clearChallenge(normalizedUsername);
+      console.log(`[SUCCESS] User ${normalizedUsername} authenticated`);
+      return res.json({ verified: true, username: normalizedUsername });
     }
-    return res.status(400).json({ error: 'Authentication failed' });
+    
+    return res.status(401).json({ error: 'Authentication failed' });
   } catch (error) {
-    console.error('Authentication error:', error);
-    return res.status(500).json({ error: error.message });
+    console.error('[ERROR] Authentication failed:', error);
+    return res.status(500).json({ error: 'Authentication failed: ' + error.message });
   }
 });
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
-  console.log('Configured for:', {
-    rpName,
-    rpID,
-    origin
-  });
+  console.log('Configuration:', { rpName, rpID, origin });
 });
