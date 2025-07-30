@@ -22,7 +22,7 @@ const users = {}; // Store challenges temporarily
 const authenticators = {}; // Store permanent authenticator data
 
 const rpName = 'Gemini WebAuthn Demo';
-const rpID = 'localhost';
+const rpID = 'password-test-frontend.vercel.app';
 const origin = `http://${rpID}:5173`;
 
 console.log('Server started. In-memory stores are empty.');
