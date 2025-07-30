@@ -12,7 +12,7 @@ import {
 const app = express();
 app.use(express.json());
 app.use(cors({
-  origin: 'http://localhost:5173', // Vite dev server address
+  origin: '*', // Vite dev server address
   credentials: true,
 }));
 
