@@ -28,32 +28,31 @@ const authenticators = {}; // username -> authenticator data
 // 1. Registration - Generate options
 app.get('/generate-registration-options', async (req, res) => {
   const { username } = req.query;
-  if (!username) return res.status(400).json({ error: 'Username is required' });
+  console.log(`\n[GET /generate-registration-options] for username: ${username}`);
 
-  if (authenticators[username]) {
-    return res.status(400).json({ error: 'Username already taken' });
+  if (!username) {
+    console.log('[ERROR] Username is required');
+    return res.status(400).json({ error: 'Username is required' });
   }
 
-  const userID = username; // For demo; use unique IDs in real systems
+  if (authenticators[username]) {
+    console.log(`[ERROR] Username "${username}" is already registered.`);
+    return res.status(400).json({ error: 'Username already taken' });
+  }
 
   const options = await generateRegistrationOptions({
     rpName,
     rpID,
-    userID,
     userName: username,
-    userDisplayName: username,
+    excludeCredentials: [],
     authenticatorSelection: {
       authenticatorAttachment: 'platform',
-      userVerification: 'required',
-      requireResidentKey: true, // Allow usernameless login
+      userVerification: 'required', 
+      // **FIX**: Change from false to true. This creates a "discoverable credential" (resident key),
+      // which is more robust and easily found by the browser during login.
+      requireResidentKey: true,
     },
-    attestationType: 'none',
   });
-
-  users[username] = { currentChallenge: options.challenge };
-
-  res.json(options);
-});
 
 // 2. Registration - Verify response
 app.post('/verify-registration', async (req, res) => {
