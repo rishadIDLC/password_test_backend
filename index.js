@@ -1,4 +1,5 @@
 // server.js
+
 import express from 'express';
 import cors from 'cors';
 import {
@@ -12,20 +13,24 @@ const app = express();
 app.use(express.json());
 
 const rpName = 'Gemini WebAuthn Demo';
-const rpID = 'password-test-frontend.vercel.app'; // Your frontend domain
-const origin = `https://${rpID}`;
+// The domain name of your frontend
+const rpID = 'password-test-frontend.vercel.app'; 
+// The full URL of your frontend
+const origin = `https://${rpID}`; 
 
-// Enable CORS only for your frontend
 app.use(cors({
-  origin,
+  origin: origin, // Allow requests only from your frontend URL
   credentials: true,
 }));
 
-// Temporary in-memory stores
-const users = {};         // username -> { currentChallenge }
-const authenticators = {}; // username -> authenticator data
+// In-memory store for users and their authenticators.
+// In a real app, you would use a database (e.g., PostgreSQL, MongoDB).
+const users = {}; // Store challenges temporarily
+const authenticators = {}; // Store permanent authenticator data
 
-// 1. Registration - Generate options
+console.log('Server started. In-memory stores are empty.');
+
+// 1. Generate Registration Options
 app.get('/generate-registration-options', async (req, res) => {
   const { username } = req.query;
   console.log(`\n[GET /generate-registration-options] for username: ${username}`);
@@ -54,13 +59,32 @@ app.get('/generate-registration-options', async (req, res) => {
     },
   });
 
-// 2. Registration - Verify response
+  // Temporarily store the challenge for this user
+  users[username] = {
+    currentChallenge: options.challenge,
+  };
+  
+  console.log(` -> Stored challenge for "${username}". Current users with challenges:`, Object.keys(users));
+  console.log(` -> Sending options to frontend:`, options);
+
+  res.json(options);
+});
+
+// 2. Verify Registration Response
 app.post('/verify-registration', async (req, res) => {
   const { username, response } = req.body;
+  console.log(`\n[POST /verify-registration] for username: ${username}`);
+  console.log(' -> Current users with challenges:', Object.keys(users));
+
   const user = users[username];
-  if (!user) return res.status(400).json({ error: 'User not found or registration expired.' });
+
+  if (!user) {
+    console.log(`[ERROR] No challenge found for user "${username}". Maybe server restarted?`);
+    return res.status(400).json({ error: 'User not found or registration expired. Please try registering again.' });
+  }
 
   try {
+    console.log(' -> Verifying registration response with expected challenge:', user.currentChallenge);
     const verification = await verifyRegistrationResponse({
       response,
       expectedChallenge: user.currentChallenge,
@@ -70,28 +94,35 @@ app.post('/verify-registration', async (req, res) => {
     });
 
     const { verified, registrationInfo } = verification;
+    console.log(` -> Verification result: ${verified}`);
+
     if (verified && registrationInfo) {
+      console.log(' -> Verification successful. Storing new authenticator.');
       const { credentialPublicKey, credentialID, counter } = registrationInfo;
 
+      // Use Buffer for base64url conversion
       authenticators[username] = {
         credentialID: Buffer.from(credentialID).toString('base64url'),
         credentialPublicKey: Buffer.from(credentialPublicKey).toString('base64url'),
         counter,
         transports: response.response.transports,
       };
+      
+      console.log(' -> Registered authenticators:', Object.keys(authenticators));
 
+      // Clean up the temporary challenge
       delete users[username];
+
       res.json({ verified: true });
     } else {
       res.status(400).json({ error: 'Could not verify registration.' });
     }
-  } catch (err) {
-    console.error('Registration error:', err);
-    res.status(500).json({ error: err.message });
+  } catch (error) {
+    console.error('[ERROR] /verify-registration:', error);
+    res.status(500).json({ error: 'Verification failed', details: error.message });
   }
 });
 
-// 3. Authentication - Generate options
 app.get('/generate-authentication-options', async (req, res) => {
   const { username } = req.query;
   if (!authenticators[username]) {
@@ -151,7 +182,9 @@ app.post('/verify-authentication', async (req, res) => {
   }
 });
 
+
+
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
-  console.log(`✅ Server running on port ${PORT}`);
+  console.log(`Server listening on port ${PORT}`);
 });
