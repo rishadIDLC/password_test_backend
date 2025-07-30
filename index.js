@@ -53,7 +53,9 @@ app.get('/generate-registration-options', async (req, res) => {
     authenticatorSelection: {
       authenticatorAttachment: 'platform',
       userVerification: 'required', 
-      requireResidentKey: false,
+      // **FIX**: Change from false to true. This creates a "discoverable credential" (resident key),
+      // which is more robust and easily found by the browser during login.
+      requireResidentKey: true,
     },
   });
 
@@ -138,9 +140,6 @@ app.get('/generate-authentication-options', async (req, res) => {
             type: 'public-key',
             transports: authenticators[username].transports,
         }],
-        // **FIX**: Changed from 'preferred' to 'required'.
-        // This tells the browser it MUST use a verifying authenticator (e.g., fingerprint, PIN),
-        // making the login prompt consistent with the registration prompt.
         userVerification: 'required',
     });
 
