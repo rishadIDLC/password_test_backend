@@ -138,7 +138,10 @@ app.get('/generate-authentication-options', async (req, res) => {
             type: 'public-key',
             transports: authenticators[username].transports,
         }],
-        userVerification: 'preferred',
+        // **FIX**: Changed from 'preferred' to 'required'.
+        // This tells the browser it MUST use a verifying authenticator (e.g., fingerprint, PIN),
+        // making the login prompt consistent with the registration prompt.
+        userVerification: 'required',
     });
 
     // Temporarily store the challenge
